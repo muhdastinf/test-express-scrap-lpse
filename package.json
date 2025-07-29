@@ -1,24 +1,20 @@
 {
-  "name": "test-express-scrap-lpse",
+  "name": "vercel-scraper-api",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "API Scraper untuk data lelang",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/muhdastinf/test-express-scrap-lpse.git"
-  },
-  "keywords": [],
+  "keywords": [
+    "scraper",
+    "api",
+    "vercel"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/muhdastinf/test-express-scrap-lpse/issues"
-  },
-  "homepage": "https://github.com/muhdastinf/test-express-scrap-lpse#readme",
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^4.19.2",
+    "https-proxy-agent": "^7.0.4"
   }
 }
