@@ -1,17 +1,46 @@
 // scraper.js
 
+// Impor kedua modul http dan https
+const http = require('http');
 const https = require('https');
 const querystring = require('querystring');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
+/**
+ * Fungsi ini secara dinamis memilih modul http atau https berdasarkan URL.
+ * @param {string} urlString URL tujuan.
+ * @returns {object} Modul http atau https.
+ */
+const getRequestModule = (urlString) => {
+    return urlString.startsWith('https') ? https : http;
+};
 
 /**
  * Mengambil token dan cookie dari halaman utama.
  * @param {string} url URL halaman lelang.
  * @param {object} headers Headers untuk request.
+ * @param {string|null} proxyUrl URL proxy opsional.
  * @returns {Promise<{token: string, cookie: string}>}
  */
-function getTokenAndCookie(url, headers) {
+function getTokenAndCookie(url, headers, proxyUrl = null) {
     return new Promise((resolve, reject) => {
-        https.get(url, { headers }, (res) => {
+        const options = { headers };
+        if (proxyUrl) {
+            options.agent = new HttpsProxyAgent(proxyUrl);
+        }
+
+        const requestModule = getRequestModule(url);
+
+        const req = requestModule.get(url, options, (res) => {
+            // Menangani redirect (kode 301, 302)
+            if (res.statusCode === 301 || res.statusCode === 302) {
+                console.log(`Redirect terdeteksi ke: ${res.headers.location}`);
+                // Rekursif memanggil fungsi dengan URL baru dari header location
+                return getTokenAndCookie(res.headers.location, headers, proxyUrl)
+                    .then(resolve)
+                    .catch(reject);
+            }
+
             let html = '';
             const cookie = res.headers['set-cookie']?.join('; ') || '';
             
@@ -20,17 +49,22 @@ function getTokenAndCookie(url, headers) {
             });
 
             res.on('end', () => {
+                if (!html.includes('authenticityToken')) {
+                    console.log("HTML diterima (token tidak ditemukan):", html.substring(0, 500) + "...");
+                }
+
                 const tokenRegex = /authenticityToken = '([a-f0-9]+)';/;
                 const match = html.match(tokenRegex);
                 
                 if (match && match[1]) {
                     resolve({ token: match[1], cookie: cookie });
                 } else {
-                    reject(new Error('Gagal menemukan authenticityToken di halaman target. Mungkin struktur halaman telah berubah.'));
+                    reject(new Error('Gagal menemukan authenticityToken di halaman target. Mungkin struktur halaman telah berubah atau IP diblokir.'));
                 }
             });
-
-        }).on('error', (err) => {
+        });
+        
+        req.on('error', (err) => {
             reject(err);
         });
     });
@@ -41,9 +75,10 @@ function getTokenAndCookie(url, headers) {
  * @param {string} url URL untuk mengambil data.
  * @param {object} payload Data yang akan dikirim.
  * @param {object} headers Headers untuk request.
+ * @param {string|null} proxyUrl URL proxy opsional.
  * @returns {Promise<object>}
  */
-function postForTenderData(url, payload, headers) {
+function postForTenderData(url, payload, headers, proxyUrl = null) {
     return new Promise((resolve, reject) => {
         const postData = querystring.stringify(payload);
         const urlObject = new URL(url);
@@ -59,7 +94,13 @@ function postForTenderData(url, payload, headers) {
             }
         };
 
-        const req = https.request(options, (res) => {
+        if (proxyUrl) {
+            options.agent = new HttpsProxyAgent(proxyUrl);
+        }
+
+        const requestModule = getRequestModule(url);
+
+        const req = requestModule.request(options, (res) => {
             let jsonResponse = '';
             res.setEncoding('utf8');
             res.on('data', (chunk) => {
@@ -67,6 +108,10 @@ function postForTenderData(url, payload, headers) {
             });
             res.on('end', () => {
                 try {
+                    // Cek jika response kosong, yang bisa terjadi jika ada masalah
+                    if (!jsonResponse) {
+                        return reject(new Error('Menerima respons kosong dari server.'));
+                    }
                     resolve(JSON.parse(jsonResponse));
                 } catch (e) {
                     reject(new Error('Gagal mem-parsing respons JSON dari server: ' + e.message));
@@ -88,22 +133,25 @@ function postForTenderData(url, payload, headers) {
  * @param {number} year Tahun lelang.
  * @param {number} pageNumber Nomor halaman.
  * @param {number} pageSize Jumlah data per halaman.
+ * @param {string|null} proxyUrl URL proxy opsional.
  * @returns {Promise<{success: boolean, data?: object, error?: string, metadata?: object}>}
  */
-async function fetchTenderData(year, pageNumber = 1, pageSize = 10) {
-    const baseUrl = 'https://spse.inaproc.id/kemkes';
+async function fetchTenderData(year, pageNumber = 1, pageSize = 10, proxyUrl = null) {
+    // *** PERUBAHAN UTAMA: Gunakan http sebagai default ***
+    const baseUrl = 'http://spse.inaproc.id/kemkes';
     const lelangPageUrl = `${baseUrl}/lelang`;
+    // URL data tidak perlu diubah karena akan mengikuti baseUrl
     const dataUrl = `${baseUrl}/dt/lelang?tahun=${year}`;
 
     const commonHeaders = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
     };
 
     try {
-        // Step 1: Get token and cookie
-        const { token, cookie } = await getTokenAndCookie(lelangPageUrl, commonHeaders);
+        const { token, cookie } = await getTokenAndCookie(lelangPageUrl, commonHeaders, proxyUrl);
 
-        // Step 2: Build payload
         const start = (pageNumber - 1) * pageSize;
         const payload = {
             'draw': pageNumber,
@@ -121,14 +169,14 @@ async function fetchTenderData(year, pageNumber = 1, pageSize = 10) {
             'authenticityToken': token
         };
 
-        // Step 3: POST request
         const headersForPost = {
             ...commonHeaders,
             'Cookie': cookie,
-            'Referer': lelangPageUrl
+            'Referer': lelangPageUrl,
+            'X-Requested-With': 'XMLHttpRequest'
         };
 
-        const tenderData = await postForTenderData(dataUrl, payload, headersForPost);
+        const tenderData = await postForTenderData(dataUrl, payload, headersForPost, proxyUrl);
 
         return {
             success: true,
@@ -145,5 +193,4 @@ async function fetchTenderData(year, pageNumber = 1, pageSize = 10) {
     }
 }
 
-// Ekspor fungsi utama agar bisa digunakan di file lain
 module.exports = { fetchTenderData };
