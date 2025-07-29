@@ -19,16 +19,15 @@ function getTokenAndCookie(url, headers) {
                 html += chunk;
             });
 
-            console.log(res);
-
             res.on('end', () => {
+                console.log(html);
                 const tokenRegex = /authenticityToken = '([a-f0-9]+)';/;
                 const match = html.match(tokenRegex);
                 
                 if (match && match[1]) {
                     resolve({ token: match[1], cookie: cookie });
                 } else {
-                    reject(new Error('Gagal menemukan authenticityToken di halaman target' + res[0]));
+                    reject(new Error('Gagal menemukan authenticityToken di halaman target' + res));
                 }
             });
 
