@@ -28,7 +28,7 @@ function getTokenAndCookie(url, headers) {
                 if (match && match[1]) {
                     resolve({ token: match[1], cookie: cookie });
                 } else {
-                    reject(new Error('Gagal menemukan authenticityToken di halaman target' + res));
+                    reject(new Error('Gagal menemukan authenticityToken di halaman target' + res[0]));
                 }
             });
 
