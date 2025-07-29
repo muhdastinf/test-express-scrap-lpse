@@ -1,48 +1,127 @@
-// scraper.js
+// enhanced-scraper.js
 
 const https = require('https');
 const querystring = require('querystring');
 
 /**
- * Mengambil token dan cookie dari halaman utama.
- * @param {string} url URL halaman lelang.
- * @param {object} headers Headers untuk request.
- * @returns {Promise<{token: string, cookie: string}>}
+ * Enhanced headers untuk bypass Cloudflare
+ */
+function getEnhancedHeaders() {
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"'
+    };
+}
+
+/**
+ * Retry mechanism dengan exponential backoff
+ */
+async function retryRequest(requestFunc, maxRetries = 3, baseDelay = 1000) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const result = await requestFunc();
+            return result;
+        } catch (error) {
+            console.log(`Attempt ${attempt} failed:`, error.message);
+            
+            if (attempt === maxRetries) {
+                throw error;
+            }
+            
+            // Exponential backoff with jitter
+            const delay = baseDelay * Math.pow(2, attempt - 1) + Math.random() * 1000;
+            console.log(`Waiting ${Math.round(delay)}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
+/**
+ * Check jika response adalah Cloudflare challenge
+ */
+function isCloudflareChallenge(html) {
+    return html.includes('Just a moment...') || 
+           html.includes('Enable JavaScript and cookies to continue') ||
+           html.includes('challenge-platform');
+}
+
+/**
+ * Mengambil token dan cookie dari halaman utama dengan retry
  */
 function getTokenAndCookie(url, headers) {
     return new Promise((resolve, reject) => {
-        https.get(url, { headers }, (res) => {
+        const options = {
+            timeout: 30000, // 30 second timeout
+            headers: headers
+        };
+
+        const req = https.get(url, options, (res) => {
             let html = '';
             const cookie = res.headers['set-cookie']?.join('; ') || '';
+            
+            // Handle different encodings
+            res.setEncoding('utf8');
             
             res.on('data', (chunk) => {
                 html += chunk;
             });
 
             res.on('end', () => {
-                console.log(html);
+                // Check for Cloudflare challenge
+                if (isCloudflareChallenge(html)) {
+                    reject(new Error('Detected Cloudflare challenge page. Request blocked by anti-bot protection.'));
+                    return;
+                }
+
+                console.log('Response length:', html.length);
+                console.log('First 500 chars:', html.substring(0, 500));
+                
                 const tokenRegex = /authenticityToken = '([a-f0-9]+)';/;
                 const match = html.match(tokenRegex);
                 
                 if (match && match[1]) {
                     resolve({ token: match[1], cookie: cookie });
                 } else {
-                    reject(new Error('Gagal menemukan authenticityToken di halaman target' + html));
+                    // Try alternative token patterns
+                    const altTokenRegex = /_token['"]\s*:\s*['"]([^'"]+)['"]/;
+                    const altMatch = html.match(altTokenRegex);
+                    
+                    if (altMatch && altMatch[1]) {
+                        resolve({ token: altMatch[1], cookie: cookie });
+                    } else {
+                        reject(new Error('Token tidak ditemukan dalam response HTML'));
+                    }
                 }
             });
-
-        }).on('error', (err) => {
-            reject(err);
         });
+
+        req.on('error', (err) => {
+            reject(new Error(`Request error: ${err.message}`));
+        });
+
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Request timeout'));
+        });
+
+        req.setTimeout(30000);
     });
 }
 
 /**
- * Mengirim request POST untuk mendapatkan data tender.
- * @param {string} url URL untuk mengambil data.
- * @param {object} payload Data yang akan dikirim.
- * @param {object} headers Headers untuk request.
- * @returns {Promise<object>}
+ * Enhanced POST request dengan better error handling
  */
 function postForTenderData(url, payload, headers) {
     return new Promise((resolve, reject) => {
@@ -53,56 +132,74 @@ function postForTenderData(url, payload, headers) {
             hostname: urlObject.hostname,
             path: urlObject.pathname + urlObject.search,
             method: 'POST',
+            timeout: 30000,
             headers: {
                 ...headers,
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'Content-Length': Buffer.byteLength(postData)
+                'Content-Length': Buffer.byteLength(postData),
+                'X-Requested-With': 'XMLHttpRequest' // Important for AJAX requests
             }
         };
 
         const req = https.request(options, (res) => {
             let jsonResponse = '';
             res.setEncoding('utf8');
+            
             res.on('data', (chunk) => {
                 jsonResponse += chunk;
             });
+            
             res.on('end', () => {
+                // Check if response is Cloudflare challenge
+                if (isCloudflareChallenge(jsonResponse)) {
+                    reject(new Error('POST request blocked by Cloudflare'));
+                    return;
+                }
+
                 try {
-                    resolve(JSON.parse(jsonResponse));
+                    const parsed = JSON.parse(jsonResponse);
+                    resolve(parsed);
                 } catch (e) {
-                    reject(new Error('Gagal mem-parsing respons JSON dari server: ' + e.message));
+                    console.log('Raw response:', jsonResponse.substring(0, 500));
+                    reject(new Error(`Failed to parse JSON response: ${e.message}`));
                 }
             });
         });
 
         req.on('error', (e) => {
-            reject(new Error('Request error: ' + e.message));
+            reject(new Error(`POST request error: ${e.message}`));
         });
 
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('POST request timeout'));
+        });
+
+        req.setTimeout(30000);
         req.write(postData);
         req.end();
     });
 }
 
 /**
- * Fungsi utama untuk mengambil data tender berdasarkan parameter.
- * @param {number} year Tahun lelang.
- * @param {number} pageNumber Nomor halaman.
- * @param {number} pageSize Jumlah data per halaman.
- * @returns {Promise<{success: boolean, data?: object, error?: string, metadata?: object}>}
+ * Main function dengan enhanced error handling dan retry logic
  */
 async function fetchTenderData(year, pageNumber = 1, pageSize = 10) {
     const baseUrl = 'https://spse.inaproc.id/kemkes';
     const lelangPageUrl = `${baseUrl}/lelang`;
     const dataUrl = `${baseUrl}/dt/lelang?tahun=${year}`;
 
-    const commonHeaders = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-    };
-
     try {
-        // Step 1: Get token and cookie
-        const { token, cookie } = await getTokenAndCookie(lelangPageUrl, commonHeaders);
+        console.log(`Starting fetch for year: ${year}, page: ${pageNumber}, size: ${pageSize}`);
+
+        // Step 1: Get token and cookie with retry
+        const { token, cookie } = await retryRequest(
+            () => getTokenAndCookie(lelangPageUrl, getEnhancedHeaders()),
+            3,
+            2000
+        );
+
+        console.log('Successfully obtained token and cookie');
 
         // Step 2: Build payload
         const start = (pageNumber - 1) * pageSize;
@@ -122,14 +219,24 @@ async function fetchTenderData(year, pageNumber = 1, pageSize = 10) {
             'authenticityToken': token
         };
 
-        // Step 3: POST request
+        // Step 3: POST request with enhanced headers
         const headersForPost = {
-            ...commonHeaders,
+            ...getEnhancedHeaders(),
             'Cookie': cookie,
-            'Referer': lelangPageUrl
+            'Referer': lelangPageUrl,
+            'Origin': 'https://spse.inaproc.id'
         };
 
-        const tenderData = await postForTenderData(dataUrl, payload, headersForPost);
+        // Add random delay to seem more human-like
+        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
+
+        const tenderData = await retryRequest(
+            () => postForTenderData(dataUrl, payload, headersForPost),
+            2,
+            3000
+        );
+
+        console.log('Successfully fetched tender data');
 
         return {
             success: true,
@@ -138,13 +245,24 @@ async function fetchTenderData(year, pageNumber = 1, pageSize = 10) {
         };
 
     } catch (error) {
-        console.error("Kesalahan pada proses scraping:", error.message);
+        console.error("Enhanced scraper error:", error.message);
+        
+        // Provide more specific error messages
+        let errorMessage = error.message;
+        if (error.message.includes('Cloudflare')) {
+            errorMessage = 'Request blocked by anti-bot protection. This is common when accessing from cloud servers.';
+        } else if (error.message.includes('timeout')) {
+            errorMessage = 'Request timeout. The server may be overloaded or blocking requests.';
+        } else if (error.message.includes('Token tidak ditemukan')) {
+            errorMessage = 'Unable to extract authentication token from the webpage.';
+        }
+        
         return {
             success: false,
-            error: error.message
+            error: errorMessage,
+            originalError: error.message
         };
     }
 }
 
-// Ekspor fungsi utama agar bisa digunakan di file lain
 module.exports = { fetchTenderData };
