@@ -1,0 +1,24 @@
+{
+  "name": "test-express-scrap-lpse",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muhdastinf/test-express-scrap-lpse.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/muhdastinf/test-express-scrap-lpse/issues"
+  },
+  "homepage": "https://github.com/muhdastinf/test-express-scrap-lpse#readme",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
