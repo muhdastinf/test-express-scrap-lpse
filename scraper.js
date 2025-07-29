@@ -1,77 +1,166 @@
-// enhanced-scraper.js
+// alternative-scraper.js
 
 const https = require('https');
 const querystring = require('querystring');
 
 /**
- * Enhanced headers untuk bypass Cloudflare
+ * Strategy 1: Try without authentication token (some APIs accept requests without CSRF)
  */
-function getEnhancedHeaders() {
-    return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"'
-    };
+async function tryWithoutToken(url, payload, headers) {
+    const payloadWithoutToken = { ...payload };
+    delete payloadWithoutToken.authenticityToken;
+    
+    return postForTenderData(url, payloadWithoutToken, headers);
 }
 
 /**
- * Retry mechanism dengan exponential backoff
+ * Strategy 2: Try with common default tokens
  */
-async function retryRequest(requestFunc, maxRetries = 3, baseDelay = 1000) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+async function tryWithCommonTokens(url, payload, headers) {
+    const commonTokens = [
+        '', // empty token
+        'null',
+        'undefined',
+        '1',
+        'test',
+        'token',
+        'csrf',
+        'anonymous'
+    ];
+    
+    for (const token of commonTokens) {
         try {
-            const result = await requestFunc();
-            return result;
-        } catch (error) {
-            console.log(`Attempt ${attempt} failed:`, error.message);
+            const payloadWithToken = { ...payload, authenticityToken: token };
+            const result = await postForTenderData(url, payloadWithToken, headers);
             
-            if (attempt === maxRetries) {
-                throw error;
+            // Check if response is valid (not error)
+            if (result && !result.error && result.data !== undefined) {
+                console.log(`Success with token: "${token}"`);
+                return result;
             }
-            
-            // Exponential backoff with jitter
-            const delay = baseDelay * Math.pow(2, attempt - 1) + Math.random() * 1000;
-            console.log(`Waiting ${Math.round(delay)}ms before retry...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+        } catch (error) {
+            console.log(`Failed with token "${token}":`, error.message);
+            continue;
         }
     }
+    
+    throw new Error('All common tokens failed');
 }
 
 /**
- * Check jika response adalah Cloudflare challenge
+ * Strategy 3: Try to bypass CSRF by using different request methods
  */
-function isCloudflareChallenge(html) {
-    return html.includes('Just a moment...') || 
-           html.includes('Enable JavaScript and cookies to continue') ||
-           html.includes('challenge-platform');
-}
-
-/**
- * Mengambil token dan cookie dari halaman utama dengan retry
- */
-function getTokenAndCookie(url, headers) {
+async function tryAlternativeMethod(baseUrl, year, pageNumber, pageSize, headers) {
+    // Try GET method with parameters
+    const getUrl = `${baseUrl}/dt/lelang?tahun=${year}&start=${(pageNumber - 1) * pageSize}&length=${pageSize}&draw=${pageNumber}`;
+    
     return new Promise((resolve, reject) => {
-        const options = {
-            timeout: 30000, // 30 second timeout
-            headers: headers
-        };
+        https.get(getUrl, { headers }, (res) => {
+            let jsonResponse = '';
+            res.setEncoding('utf8');
+            
+            res.on('data', (chunk) => {
+                jsonResponse += chunk;
+            });
+            
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(jsonResponse);
+                    resolve(parsed);
+                } catch (e) {
+                    reject(new Error(`GET method failed: ${e.message}`));
+                }
+            });
+        }).on('error', (err) => {
+            reject(err);
+        });
+    });
+}
 
-        const req = https.get(url, options, (res) => {
+/**
+ * Strategy 4: Try to extract token from different pages
+ */
+async function tryDifferentPages(baseUrl, headers) {
+    const pages = [
+        `${baseUrl}/lelang`,
+        `${baseUrl}/`,
+        `${baseUrl}/beranda`,
+        `${baseUrl}/login`,
+        baseUrl.replace('/kemkes', '') // Try root domain
+    ];
+    
+    for (const pageUrl of pages) {
+        try {
+            console.log(`Trying to get token from: ${pageUrl}`);
+            const { token } = await getTokenFromPage(pageUrl, headers);
+            if (token) {
+                console.log(`Token found on page: ${pageUrl}`);
+                return { token, page: pageUrl };
+            }
+        } catch (error) {
+            console.log(`Failed to get token from ${pageUrl}:`, error.message);
+            continue;
+        }
+    }
+    
+    throw new Error('No token found on any page');
+}
+
+/**
+ * Enhanced token extraction with multiple patterns
+ */
+function extractTokenFromHtml(html) {
+    const patterns = [
+        // Original pattern
+        /authenticityToken = '([a-f0-9]+)';/,
+        /authenticityToken:\s*['"]([^'"]+)['"]/,
+        
+        // Meta tags
+        /<meta\s+name=['"](csrf-token|_token)['"]\s+content=['"]([^'"]+)['"]/, 
+        /<meta\s+content=['"]([^'"]+)['"]\s+name=['"](csrf-token|_token)['"]/, 
+        
+        // Input fields
+        /<input[^>]*name=['"](.*token.*)['"]*[^>]*value=['"]([^'"]+)['"]/, 
+        /<input[^>]*value=['"]([^'"]+)['"]*[^>]*name=['"](.*token.*)['"]/, 
+        
+        // JavaScript variables
+        /window\.[^=]*token[^=]*=\s*['"]([^'"]+)['"]/,
+        /var\s+[^=]*token[^=]*=\s*['"]([^'"]+)['"]/, 
+        /let\s+[^=]*token[^=]*=\s*['"]([^'"]+)['"]/,
+        /const\s+[^=]*token[^=]*=\s*['"]([^'"]+)['"]/, 
+        
+        // Data attributes
+        /data-[^=]*token[^=]*=['"]([^'"]+)['"]/,
+        
+        // Laravel style
+        /"csrf_token"\s*:\s*"([^"]+)"/,
+        /'csrf_token'\s*:\s*'([^']+)'/,
+        
+        // Generic token patterns
+        /"token"\s*:\s*"([^"]+)"/,
+        /'token'\s*:\s*'([^']+)'/
+    ];
+    
+    for (const pattern of patterns) {
+        const match = html.match(pattern);
+        if (match) {
+            // Return the first capturing group that's not undefined
+            return match.find((group, index) => index > 0 && group && group.length > 10);
+        }
+    }
+    
+    return null;
+}
+
+/**
+ * Get token from specific page
+ */
+function getTokenFromPage(url, headers) {
+    return new Promise((resolve, reject) => {
+        https.get(url, { headers, timeout: 15000 }, (res) => {
             let html = '';
             const cookie = res.headers['set-cookie']?.join('; ') || '';
             
-            // Handle different encodings
             res.setEncoding('utf8');
             
             res.on('data', (chunk) => {
@@ -79,49 +168,18 @@ function getTokenAndCookie(url, headers) {
             });
 
             res.on('end', () => {
-                // Check for Cloudflare challenge
-                if (isCloudflareChallenge(html)) {
-                    reject(new Error('Detected Cloudflare challenge page. Request blocked by anti-bot protection.'));
-                    return;
-                }
-
-                console.log('Response length:', html.length);
-                console.log('First 500 chars:', html.substring(0, 500));
-                
-                const tokenRegex = /authenticityToken = '([a-f0-9]+)';/;
-                const match = html.match(tokenRegex);
-                
-                if (match && match[1]) {
-                    resolve({ token: match[1], cookie: cookie });
-                } else {
-                    // Try alternative token patterns
-                    const altTokenRegex = /_token['"]\s*:\s*['"]([^'"]+)['"]/;
-                    const altMatch = html.match(altTokenRegex);
-                    
-                    if (altMatch && altMatch[1]) {
-                        resolve({ token: altMatch[1], cookie: cookie });
-                    } else {
-                        reject(new Error('Token tidak ditemukan dalam response HTML'));
-                    }
-                }
+                const token = extractTokenFromHtml(html);
+                resolve({ token, cookie, html: html.substring(0, 1000) });
             });
-        });
 
-        req.on('error', (err) => {
-            reject(new Error(`Request error: ${err.message}`));
+        }).on('error', (err) => {
+            reject(err);
         });
-
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('Request timeout'));
-        });
-
-        req.setTimeout(30000);
     });
 }
 
 /**
- * Enhanced POST request dengan better error handling
+ * Enhanced POST function
  */
 function postForTenderData(url, payload, headers) {
     return new Promise((resolve, reject) => {
@@ -132,12 +190,12 @@ function postForTenderData(url, payload, headers) {
             hostname: urlObject.hostname,
             path: urlObject.pathname + urlObject.search,
             method: 'POST',
-            timeout: 30000,
+            timeout: 20000,
             headers: {
                 ...headers,
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                 'Content-Length': Buffer.byteLength(postData),
-                'X-Requested-With': 'XMLHttpRequest' // Important for AJAX requests
+                'X-Requested-With': 'XMLHttpRequest'
             }
         };
 
@@ -150,18 +208,16 @@ function postForTenderData(url, payload, headers) {
             });
             
             res.on('end', () => {
-                // Check if response is Cloudflare challenge
-                if (isCloudflareChallenge(jsonResponse)) {
-                    reject(new Error('POST request blocked by Cloudflare'));
-                    return;
-                }
-
                 try {
                     const parsed = JSON.parse(jsonResponse);
                     resolve(parsed);
                 } catch (e) {
-                    console.log('Raw response:', jsonResponse.substring(0, 500));
-                    reject(new Error(`Failed to parse JSON response: ${e.message}`));
+                    // If not JSON, might still be successful HTML response
+                    if (res.statusCode === 200 && jsonResponse.includes('data')) {
+                        resolve({ data: jsonResponse, raw: true });
+                    } else {
+                        reject(new Error(`JSON parse failed: ${e.message}. Response: ${jsonResponse.substring(0, 500)}`));
+                    }
                 }
             });
         });
@@ -175,94 +231,97 @@ function postForTenderData(url, payload, headers) {
             reject(new Error('POST request timeout'));
         });
 
-        req.setTimeout(30000);
+        req.setTimeout(20000);
         req.write(postData);
         req.end();
     });
 }
 
 /**
- * Main function dengan enhanced error handling dan retry logic
+ * Main function with multiple fallback strategies
  */
-async function fetchTenderData(year, pageNumber = 1, pageSize = 10) {
+async function fetchTenderDataWithFallback(year, pageNumber = 1, pageSize = 10) {
     const baseUrl = 'https://spse.inaproc.id/kemkes';
-    const lelangPageUrl = `${baseUrl}/lelang`;
     const dataUrl = `${baseUrl}/dt/lelang?tahun=${year}`;
+    
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin'
+    };
 
-    try {
-        console.log(`Starting fetch for year: ${year}, page: ${pageNumber}, size: ${pageSize}`);
+    // Build base payload
+    const start = (pageNumber - 1) * pageSize;
+    const basePayload = {
+        'draw': pageNumber,
+        'columns[0][data]': '0', 'columns[0][name]': '', 'columns[0][searchable]': 'true', 'columns[0][orderable]': 'true', 'columns[0][search][value]': '', 'columns[0][search][regex]': 'false',
+        'columns[1][data]': '1', 'columns[1][name]': '', 'columns[1][searchable]': 'true', 'columns[1][orderable]': 'true', 'columns[1][search][value]': '', 'columns[1][search][regex]': 'false',
+        'columns[2][data]': '2', 'columns[2][name]': '', 'columns[2][searchable]': 'true', 'columns[2][orderable]': 'true', 'columns[2][search][value]': '', 'columns[2][search][regex]': 'false',
+        'columns[3][data]': '3', 'columns[3][name]': '', 'columns[3][searchable]': 'false', 'columns[3][orderable]': 'false', 'columns[3][search][value]': '', 'columns[3][search][regex]': 'false',
+        'columns[4][data]': '4', 'columns[4][name]': '', 'columns[4][searchable]': 'true', 'columns[4][orderable]': 'true', 'columns[4][search][value]': '', 'columns[4][search][regex]': 'false',
+        'columns[5][data]': '5', 'columns[5][name]': '', 'columns[5][searchable]': 'true', 'columns[5][orderable]': 'true', 'columns[5][search][value]': '', 'columns[5][search][regex]': 'false',
+        'order[0][column]': '5', 'order[0][dir]': 'desc',
+        'start': start,
+        'length': pageSize,
+        'search[value]': '',
+        'search[regex]': 'false'
+    };
 
-        // Step 1: Get token and cookie with retry
-        const { token, cookie } = await retryRequest(
-            () => getTokenAndCookie(lelangPageUrl, getEnhancedHeaders()),
-            3,
-            2000
-        );
-
-        console.log('Successfully obtained token and cookie');
-
-        // Step 2: Build payload
-        const start = (pageNumber - 1) * pageSize;
-        const payload = {
-            'draw': pageNumber,
-            'columns[0][data]': '0', 'columns[0][name]': '', 'columns[0][searchable]': 'true', 'columns[0][orderable]': 'true', 'columns[0][search][value]': '', 'columns[0][search][regex]': 'false',
-            'columns[1][data]': '1', 'columns[1][name]': '', 'columns[1][searchable]': 'true', 'columns[1][orderable]': 'true', 'columns[1][search][value]': '', 'columns[1][search][regex]': 'false',
-            'columns[2][data]': '2', 'columns[2][name]': '', 'columns[2][searchable]': 'true', 'columns[2][orderable]': 'true', 'columns[2][search][value]': '', 'columns[2][search][regex]': 'false',
-            'columns[3][data]': '3', 'columns[3][name]': '', 'columns[3][searchable]': 'false', 'columns[3][orderable]': 'false', 'columns[3][search][value]': '', 'columns[3][search][regex]': 'false',
-            'columns[4][data]': '4', 'columns[4][name]': '', 'columns[4][searchable]': 'true', 'columns[4][orderable]': 'true', 'columns[4][search][value]': '', 'columns[4][search][regex]': 'false',
-            'columns[5][data]': '5', 'columns[5][name]': '', 'columns[5][searchable]': 'true', 'columns[5][orderable]': 'true', 'columns[5][search][value]': '', 'columns[5][search][regex]': 'false',
-            'order[0][column]': '5', 'order[0][dir]': 'desc',
-            'start': start,
-            'length': pageSize,
-            'search[value]': '',
-            'search[regex]': 'false',
-            'authenticityToken': token
-        };
-
-        // Step 3: POST request with enhanced headers
-        const headersForPost = {
-            ...getEnhancedHeaders(),
-            'Cookie': cookie,
-            'Referer': lelangPageUrl,
-            'Origin': 'https://spse.inaproc.id'
-        };
-
-        // Add random delay to seem more human-like
-        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
-
-        const tenderData = await retryRequest(
-            () => postForTenderData(dataUrl, payload, headersForPost),
-            2,
-            3000
-        );
-
-        console.log('Successfully fetched tender data');
-
-        return {
-            success: true,
-            data: tenderData,
-            metadata: { year, pageNumber, pageSize }
-        };
-
-    } catch (error) {
-        console.error("Enhanced scraper error:", error.message);
-        
-        // Provide more specific error messages
-        let errorMessage = error.message;
-        if (error.message.includes('Cloudflare')) {
-            errorMessage = 'Request blocked by anti-bot protection. This is common when accessing from cloud servers.';
-        } else if (error.message.includes('timeout')) {
-            errorMessage = 'Request timeout. The server may be overloaded or blocking requests.';
-        } else if (error.message.includes('Token tidak ditemukan')) {
-            errorMessage = 'Unable to extract authentication token from the webpage.';
+    const strategies = [
+        {
+            name: 'Without Token',
+            execute: () => tryWithoutToken(dataUrl, basePayload, headers)
+        },
+        {
+            name: 'Alternative GET Method',
+            execute: () => tryAlternativeMethod(baseUrl, year, pageNumber, pageSize, headers)
+        },
+        {
+            name: 'Common Tokens',
+            execute: () => tryWithCommonTokens(dataUrl, { ...basePayload, authenticityToken: '' }, headers)
+        },
+        {
+            name: 'Token from Different Pages',
+            execute: async () => {
+                const { token } = await tryDifferentPages(baseUrl, headers);
+                return postForTenderData(dataUrl, { ...basePayload, authenticityToken: token }, headers);
+            }
         }
-        
-        return {
-            success: false,
-            error: errorMessage,
-            originalError: error.message
-        };
+    ];
+
+    let lastError;
+    
+    for (const strategy of strategies) {
+        try {
+            console.log(`Trying strategy: ${strategy.name}`);
+            const result = await strategy.execute();
+            
+            console.log(`✓ Success with strategy: ${strategy.name}`);
+            return {
+                success: true,
+                data: result,
+                strategy: strategy.name,
+                metadata: { year, pageNumber, pageSize }
+            };
+            
+        } catch (error) {
+            console.log(`✗ Strategy "${strategy.name}" failed:`, error.message);
+            lastError = error;
+            continue;
+        }
     }
+
+    return {
+        success: false,
+        error: 'All fallback strategies failed',
+        lastError: lastError?.message,
+        metadata: { year, pageNumber, pageSize }
+    };
 }
 
-module.exports = { fetchTenderData };
+module.exports = { fetchTenderDataWithFallback };

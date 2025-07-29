@@ -1,7 +1,7 @@
 // server.js
 
 const express = require("express");
-const { fetchTenderData } = require("./scraper"); // Impor fungsi dari scraper.js
+const { fetchTenderDataWithFallback } = require("./scraper"); // Impor fungsi dari scraper.js
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -47,7 +47,7 @@ app.get("/api/lelang", async (req, res) => {
 
   try {
     // Panggil fungsi scraper dengan parameter yang sudah divalidasi
-    const result = await fetchTenderData(year, pageNumber, pageSize);
+    const result = await fetchTenderDataWithFallback(year, pageNumber, pageSize);
 
     // Jika scraper gagal, kirim respons error
     if (!result.success) {
