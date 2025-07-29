@@ -101,7 +101,7 @@ function getTokenAndCookie(url, headers) {
                     if (altMatch && altMatch[1]) {
                         resolve({ token: altMatch[1], cookie: cookie });
                     } else {
-                        reject(new Error('Token tidak ditemukan dalam response HTML'));
+                        reject(new Error('Token tidak ditemukan dalam response HTML' + html));
                     }
                 }
             });
