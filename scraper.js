@@ -2,6 +2,7 @@
 
 const https = require('https');
 const querystring = require('querystring');
+const zlib = require('zlib');
 
 /**
  * Enhanced headers untuk bypass Cloudflare
@@ -63,45 +64,67 @@ function isCloudflareChallenge(html) {
 function getTokenAndCookie(url, headers) {
     return new Promise((resolve, reject) => {
         const options = {
-            timeout: 30000, // 30 second timeout
+            timeout: 30000,
             headers: headers
         };
 
         const req = https.get(url, options, (res) => {
-            let html = '';
+            let chunks = [];
             const cookie = res.headers['set-cookie']?.join('; ') || '';
-            
-            // Handle different encodings
-            res.setEncoding('utf8');
-            
+            const encoding = res.headers['content-encoding'];
+
             res.on('data', (chunk) => {
-                html += chunk;
+                chunks.push(chunk);
             });
 
             res.on('end', () => {
-                // Check for Cloudflare challenge
-                if (isCloudflareChallenge(html)) {
-                    reject(new Error('Detected Cloudflare challenge page. Request blocked by anti-bot protection.'));
-                    return;
+                let buffer = Buffer.concat(chunks);
+
+                // Decompress if needed
+                if (encoding === 'gzip') {
+                    zlib.gunzip(buffer, (err, decoded) => {
+                        if (err) return reject(err);
+                        handleHtml(decoded.toString());
+                    });
+                } else if (encoding === 'br') {
+                    zlib.brotliDecompress(buffer, (err, decoded) => {
+                        if (err) return reject(err);
+                        handleHtml(decoded.toString());
+                    });
+                } else if (encoding === 'deflate') {
+                    zlib.inflate(buffer, (err, decoded) => {
+                        if (err) return reject(err);
+                        handleHtml(decoded.toString());
+                    });
+                } else {
+                    handleHtml(buffer.toString());
                 }
 
-                console.log('Response length:', html.length);
-                console.log('First 500 chars:', html.substring(0, 500));
-                
-                const tokenRegex = /authenticityToken = '([a-f0-9]+)';/;
-                const match = html.match(tokenRegex);
-                
-                if (match && match[1]) {
-                    resolve({ token: match[1], cookie: cookie });
-                } else {
-                    // Try alternative token patterns
-                    const altTokenRegex = /_token['"]\s*:\s*['"]([^'"]+)['"]/;
-                    const altMatch = html.match(altTokenRegex);
-                    
-                    if (altMatch && altMatch[1]) {
-                        resolve({ token: altMatch[1], cookie: cookie });
+                function handleHtml(html) {
+                    // ...your existing logic...
+                    if (isCloudflareChallenge(html)) {
+                        reject(new Error('Detected Cloudflare challenge page. Request blocked by anti-bot protection.'));
+                        return;
+                    }
+
+                    console.log('Response length:', html.length);
+                    console.log('First 500 chars:', html.substring(0, 500));
+
+                    const tokenRegex = /authenticityToken = '([a-f0-9]+)';/;
+                    const match = html.match(tokenRegex);
+
+                    if (match && match[1]) {
+                        resolve({ token: match[1], cookie: cookie });
                     } else {
-                        reject(new Error('Token tidak ditemukan dalam response HTML'));
+                        // Try alternative token patterns
+                        const altTokenRegex = /_token['"]\s*:\s*['"]([^'"]+)['"]/;
+                        const altMatch = html.match(altTokenRegex);
+
+                        if (altMatch && altMatch[1]) {
+                            resolve({ token: altMatch[1], cookie: cookie });
+                        } else {
+                            reject(new Error('Token tidak ditemukan dalam response HTML\n' + html));
+                        }
                     }
                 }
             });
