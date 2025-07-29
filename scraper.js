@@ -19,6 +19,8 @@ function getTokenAndCookie(url, headers) {
                 html += chunk;
             });
 
+            console.log(res);
+
             res.on('end', () => {
                 const tokenRegex = /authenticityToken = '([a-f0-9]+)';/;
                 const match = html.match(tokenRegex);
@@ -26,7 +28,7 @@ function getTokenAndCookie(url, headers) {
                 if (match && match[1]) {
                     resolve({ token: match[1], cookie: cookie });
                 } else {
-                    reject(new Error('Gagal menemukan authenticityToken di halaman target. Mungkin struktur halaman telah berubah.'));
+                    reject(new Error('Gagal menemukan authenticityToken di halaman target' + res));
                 }
             });
 
