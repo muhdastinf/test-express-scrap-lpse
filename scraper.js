@@ -160,31 +160,54 @@ function postForTenderData(url, payload, headers) {
                 ...headers,
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                 'Content-Length': Buffer.byteLength(postData),
-                'X-Requested-With': 'XMLHttpRequest' // Important for AJAX requests
+                'X-Requested-With': 'XMLHttpRequest'
             }
         };
 
         const req = https.request(options, (res) => {
-            let jsonResponse = '';
-            res.setEncoding('utf8');
-            
+            let chunks = [];
+            const encoding = res.headers['content-encoding'];
+
             res.on('data', (chunk) => {
-                jsonResponse += chunk;
+                chunks.push(chunk);
             });
-            
+
             res.on('end', () => {
-                // Check if response is Cloudflare challenge
-                if (isCloudflareChallenge(jsonResponse)) {
-                    reject(new Error('POST request blocked by Cloudflare'));
-                    return;
+                let buffer = Buffer.concat(chunks);
+
+                function handleJsonResponse(jsonResponse) {
+                    // Check if response is Cloudflare challenge
+                    if (isCloudflareChallenge(jsonResponse)) {
+                        reject(new Error('POST request blocked by Cloudflare'));
+                        return;
+                    }
+                    try {
+                        console.log('Raw response:', jsonResponse.substring(0, 1000)); // Debug print
+                        const parsed = JSON.parse(jsonResponse);
+                        resolve(parsed);
+                    } catch (e) {
+                        reject(new Error(`Failed to parse JSON response: ${e.message}`));
+                    }
                 }
 
-                try {
-                    const parsed = JSON.parse(jsonResponse);
-                    resolve(parsed);
-                } catch (e) {
-                    console.log('Raw response:', jsonResponse.substring(0, 500));
-                    reject(new Error(`Failed to parse JSON response: ${e.message}`));
+                // Decompress if needed
+                if (encoding === 'gzip') {
+                    zlib.gunzip(buffer, (err, decoded) => {
+                        if (err) return reject(err);
+                        handleJsonResponse(decoded.toString());
+                    });
+                } else if (encoding === 'br') {
+                    zlib.brotliDecompress(buffer, (err, decoded) => {
+                        if (err) return reject(err);
+                        handleJsonResponse(decoded.toString());
+                    });
+                } else if (encoding === 'deflate') {
+                    zlib.inflate(buffer, (err, decoded) => {
+                        if (err) return reject(err);
+                        handleJsonResponse(decoded.toString());
+                    });
+                } else {
+                    handleJsonResponse(buffer.toString());
                 }
             });
         });
